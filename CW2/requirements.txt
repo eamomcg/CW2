@@ -1,4 +1,6 @@
-pandas
+##These are the libraries needed to be installed
+
+pandas~=1.4
 scikit-learn
 mlflow
 azure-ai-ml
