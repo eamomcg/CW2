@@ -1,0 +1,36 @@
+name: BGL MLOps Pipeline (CI/CD)
+
+# Trigger: Run this pipeline whenever code is pushed to the 'main' branch
+on:
+  push:
+    branches: [ "main" ]
+
+jobs:
+  build-and-train:
+    # Uses the latest Ubuntu environment
+    runs-on: ubuntu-latest
+    
+    steps:
+    # Step 1: Check out your code from GitHub 
+    - name: Check out repository
+      uses: actions/checkout@v2
+
+    # Step 2: Log in to Azure (Lab 6)
+    - name: Azure Login
+      uses: azure/login@v1
+      with:
+        # Uses the secret key stored in GitHub
+        creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+    # Step 3: Install the Azure ML CLI extension
+    - name: Install Azure ML Extension
+      run: az extension add -n ml -y
+
+    # Step 4: Submit the Training Job
+    # This command uses the job.yml file to launch the training run on the Azure compute cluster.
+    - name: Submit Training Job
+      run: |
+        az ml job create --file CW2/production/job.yml \
+          --resource-group ${{ secrets.RESOURCE_GROUP }} \
+          --workspace-name ${{ secrets.WORKSPACE_NAME }} \
+          --stream

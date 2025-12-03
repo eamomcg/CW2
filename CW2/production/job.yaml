@@ -1,0 +1,22 @@
+$schema: https://azuremlschemas.azureedge.net/latest/commandJob.schema.json
+
+display_name: train-bgl-debug
+experiment_name: bgl-anomaly-detection
+description: Train Random Forest on BGL dataset with debug logging
+
+code: .
+
+# The '-u' flag is the most important part here for visibility
+command: >-
+  python -u model.py 
+  --data ${{inputs.training_data}} 
+  --n_estimators 10
+
+inputs:
+  training_data: 
+    type: uri_file 
+    path: azureml:bgl-data:1
+
+environment: azureml:AzureML-sklearn-1.0-ubuntu20.04-py38-cpu@latest
+
+compute: azureml:CW2Cluster

@@ -3,6 +3,7 @@
 pandas~=1.4
 scikit-learn
 mlflow
+azureml-mlflow 
 azure-ai-ml
 azure-identity
 pytest
