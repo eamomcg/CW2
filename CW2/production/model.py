@@ -66,12 +66,28 @@ def main():
         model.fit(X_train, y_train)
         print(">>> [DEBUG] Training Complete.", flush=True)
 
-        # 5. Evaluate
+       # 5. Evaluate
         y_pred = model.predict(X_test)
+        
+        # Calculate full suite of metrics for Slide 8
         f1 = f1_score(y_test, y_pred, zero_division=0)
+        precision = precision_score(y_test, y_pred, zero_division=0)
+        recall = recall_score(y_test, y_pred, zero_division=0)
         
         mlflow.log_metric("val_f1", f1)
-        print(f">>> [DEBUG] SUCCESS. F1: {f1:.4f}", flush=True)
+        mlflow.log_metric("val_precision", precision)
+        mlflow.log_metric("val_recall", recall)
+
+        print(f">>> [RESULT] F1 Score: {f1:.4f} (Threshold: {MIN_F1_THRESHOLD})", flush=True)
+
+        # --- THE QUALITY GATE ---
+        # This block ensures we abide by Assessment Criterion 3
+        if f1 < MIN_F1_THRESHOLD:
+            error_msg = f"Quality Fail: F1 ({f1:.4f}) < Threshold ({MIN_F1_THRESHOLD}). Deployment Aborted."
+            print(f">>> [FAILURE] {error_msg}")
+            raise ValueError(error_msg)
+        
+        print(">>> [SUCCESS] Quality Gate Passed. Proceeding to Registration.", flush=True)
 
 if __name__ == "__main__":
     main()
