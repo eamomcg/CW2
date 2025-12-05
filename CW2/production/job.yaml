@@ -6,7 +6,6 @@ description: Train Random Forest on BGL dataset with debug logging
 
 code: .
 
-# The '-u' flag is the most important part here for visibility
 command: >-
   python -u model.py 
   --data ${{inputs.training_data}} 

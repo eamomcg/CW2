@@ -15,7 +15,7 @@ jobs:
     - name: Check out repository
       uses: actions/checkout@v2
 
-    # Step 2: Log in to Azure (Lab 6)
+    # Step 2: Log in to Azure (had I been able to set up a service principal and store its credentials as a GitHub secret)
     - name: Azure Login
       uses: azure/login@v1
       with:
