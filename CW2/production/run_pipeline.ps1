@@ -1,84 +1,107 @@
 # -----------------------------------------------------------------
-# COM774 CW2: Local MLOps Pipeline (PowerShell Edition)
+# MASTER PIPELINE: Train -> Register -> Destroy -> Deploy
 # -----------------------------------------------------------------
-# Validated for "Azure for Students" constraints.
-# Replaces GitHub Actions due to Permission Restrictions.
+# Implements the "Split Lifecycle" pattern to fit within 6 vCPU quota.
 
-# Stop on first error to prevent cascading failures
 $ErrorActionPreference = "Stop"
 
-# --- CONFIGURATION (CHECK THESE VALUES) ---
+# --- CONFIGURATION ---
 $ResourceGroup = "EamonnUniversitty_COM774"
 $Workspace     = "COM774_CW2"
 $Cluster       = "CW2Cluster"
 $JobFile       = "job.yaml"
-
-# Randomize endpoint name slightly to ensure uniqueness if you run it multiple times
-$EndpointName  = "bgl-endpoint-v" + (Get-Random -Minimum 100 -Maximum 999)
+# Endpoint name must be unique in the region
+$EndpointName  = "bgl-endpoint-final" 
 $Deployment    = "blue-deployment"
-$InstanceType  = "Standard_DS2_v2"           # <--- Change if you hit Quota limits
+# Training = Standard_DS3_v2 (4 cores)
+# Inference = Standard_DS2_v2 (2 cores)
+# Total Required = 6 cores (Fits quota ONLY if run sequentially)
+$TrainingVM    = "Standard_DS3_v2"  # Change this to scale Training
+$InferenceVM   = "Standard_DS2_v2"  # Change this to scale the Endpoint
 
-Write-Host ">>> [1/4] Starting Pipeline Execution..." -ForegroundColor Cyan
+Write-Host ">>> [START] Pipeline Initiated..." -ForegroundColor Cyan
 
 # -----------------------------------------------------------------
-# STEP 1: Submit Training Job
+# STEP 0: PROVISION TRAINING INFRASTRUCTURE
 # -----------------------------------------------------------------
-Write-Host ">>> Submitting Training Job to $Cluster..." -ForegroundColor Yellow
+Write-Host ">>> [0/4] Provisioning Ephemeral Training Cluster..." -ForegroundColor Yellow
 
-# We use --stream to block the script until training finishes (Simulating CI/CD blocking)
-$JobRun = az ml job create --file $JobFile --resource-group $ResourceGroup --workspace-name $Workspace --stream
+# Create/Update cluster with min-instances=0 to save costs/quota when idle
+az ml compute create --name $Cluster `
+  --resource-group $ResourceGroup `
+  --workspace-name $Workspace `
+  --type amlcompute `
+  --size $TrainingVM `
+  --min-instances 0 `
+  --max-instances 1
 
-if ($LASTEXITCODE -ne 0) { Write-Error "Training failed. Stopping pipeline."; exit 1 }
+# -----------------------------------------------------------------
+# STEP 1: TRAIN (WITH QUALITY GATE)
+# -----------------------------------------------------------------
+Write-Host ">>> [1/4] Submitting Training Job..." -ForegroundColor Yellow
 
-# Retrieve the Job Name (Run ID) from the last run to use in registration
-# Note: We query the 'latest' job to get the ID we just finished
+# Submit and Stream logs. If Python script fails (F1 < 0.20), this throws an error.
+az ml job create --file $JobFile --resource-group $ResourceGroup --workspace-name $Workspace --stream
+
+if ($LASTEXITCODE -ne 0) { 
+    Write-Error "Training Failed or Quality Gate (F1 < 0.20) triggered. Pipeline Aborted."
+    exit 1 
+}
+
+# Retrieve the Run ID of the successful job
 $JobName = az ml job list --resource-group $ResourceGroup --workspace-name $Workspace --query "[0].name" --output tsv
-
-Write-Host ">>> Job Success. Run ID: $JobName" -ForegroundColor Green
+Write-Host ">>> Training Complete. Run ID: $JobName" -ForegroundColor Green
 
 # -----------------------------------------------------------------
-# STEP 2: Register Model
+# STEP 2: REGISTER MODEL
 # -----------------------------------------------------------------
-Write-Host ">>> Registering Model..." -ForegroundColor Yellow
+Write-Host ">>> [2/4] Registering Model Artifact..." -ForegroundColor Yellow
 
 $ModelName = "bgl-anomaly-rf"
-# Standard MLflow path in Azure. If this fails, check the "Outputs" tab in Azure Portal.
 $ModelPath = "azureml://jobs/$JobName/outputs/artifacts/paths/model"
 
-az ml model create --name $ModelName --path $ModelPath --type mlflow_model --resource-group $ResourceGroup --workspace-name $Workspace
-
-Write-Host ">>> Model Registered: $ModelName" -ForegroundColor Green
+az ml model create --name $ModelName --path $ModelPath --type mlflow_model --resource-group $ResourceGroup --workspace-name $Workspace --force
 
 # -----------------------------------------------------------------
-# STEP 3: Create Endpoint
+# STEP 3: DESTROY CLUSTER TO RELEASE QUOTA
 # -----------------------------------------------------------------
-Write-Host ">>> Creating Managed Endpoint: $EndpointName..." -ForegroundColor Yellow
+Write-Host ">>> [3/4] RELEASING QUOTA: Destroying Training Cluster..." -ForegroundColor Red
 
-az ml online-endpoint create --name $EndpointName --auth-mode key --resource-group $ResourceGroup --workspace-name $Workspace
+# We MUST delete the 4-core cluster to allow the 2-core AZURE Endpoint to spin up.
+# Without this, there will be insufficient memory/quota to deploy the inference VM.
+az ml compute delete --name $Cluster --resource-group $ResourceGroup --workspace-name $Workspace --yes
+
+Write-Host ">>> Quota Released." -ForegroundColor Green
 
 # -----------------------------------------------------------------
-# STEP 4: Deploy Model
+# STEP 4: DEPLOY ENDPOINT
 # -----------------------------------------------------------------
-Write-Host ">>> Deploying Model to Hardware ($InstanceType)..." -ForegroundColor Yellow
+Write-Host ">>> [4/4] Provisioning Managed Online Endpoint..." -ForegroundColor Yellow
 
-# Dynamically create the deployment YAML to point to the model we just registered
+# Create Endpoint (The "Shell" - Costs nothing until deployment added)
+# We check if it exists first to avoid errors
+$EndpointExists = az ml online-endpoint show --name $EndpointName --resource-group $ResourceGroup --workspace-name $Workspace 2>$null
+if (-not $EndpointExists) {
+    az ml online-endpoint create --name $EndpointName --auth-mode key --resource-group $ResourceGroup --workspace-name $Workspace
+}
+
+# Deploy the Model (This provisions the VM and eats the quota)
+Write-Host ">>> Deploying Model to Inference VM ($InferenceVM)..."
+
 $DeployConfig = @"
 `$schema: https://azuremlschemas.azureedge.net/latest/managedOnlineDeployment.schema.json
 name: $Deployment
 endpoint_name: $EndpointName
 model: azureml:$($ModelName):1
-instance_type: $InstanceType
+instance_type: $InferenceVM
 instance_count: 1
 "@
 
-# Save temp config
-Set-Content -Path "temp_deploy.yaml" -Value $DeployConfig -Encoding UTF8
+Set-Content -Path "deploy_config.yaml" -Value $DeployConfig -Encoding UTF8
 
-# Execute Deployment
-az ml online-deployment create --file "temp_deploy.yaml" --all-traffic --resource-group $ResourceGroup --workspace-name $Workspace
+# This step takes 6-10 minutes
+az ml online-deployment create --file "deploy_config.yaml" --all-traffic --resource-group $ResourceGroup --workspace-name $Workspace
 
-# Cleanup temp file
-Remove-Item "temp_deploy.yaml"
+Remove-Item "deploy_config.yaml"
 
-Write-Host ">>> Pipeline Complete! Endpoint is live." -ForegroundColor Cyan
-Write-Host ">>> Test URL and Keys available in Azure Portal -> Endpoints."
+Write-Host ">>> SUCCESS: Pipeline Finished. REST API is Live." -ForegroundColor Cyan
