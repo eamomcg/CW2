@@ -20,13 +20,10 @@ $TrainingVM    = "Standard_DS3_v2"  # Change this to scale Training
 $InferenceVM   = "Standard_DS2_v2"  # Change this to scale the Endpoint
 
 Write-Host ">>> [START] Pipeline Initiated..." -ForegroundColor Cyan
-
 # -----------------------------------------------------------------
 # STEP 0: PROVISION TRAINING INFRASTRUCTURE
 # -----------------------------------------------------------------
 Write-Host ">>> [0/4] Provisioning Ephemeral Training Cluster..." -ForegroundColor Yellow
-
-# Create/Update cluster with min-instances=0 to save costs/quota when idle
 az ml compute create --name $Cluster `
   --resource-group $ResourceGroup `
   --workspace-name $Workspace `
@@ -36,19 +33,17 @@ az ml compute create --name $Cluster `
   --max-instances 1
 
 # -----------------------------------------------------------------
-# STEP 1: TRAIN (WITH QUALITY GATE)
+# STEP 1: TRAIN
 # -----------------------------------------------------------------
 Write-Host ">>> [1/4] Submitting Training Job..." -ForegroundColor Yellow
-
-# Submit and Stream logs. If Python script fails (F1 < 0.20), this throws an error.
 az ml job create --file $JobFile --resource-group $ResourceGroup --workspace-name $Workspace --stream
 
 if ($LASTEXITCODE -ne 0) { 
-    Write-Error "Training Failed or Quality Gate (F1 < 0.20) triggered. Pipeline Aborted."
+    Write-Error "Training Failed. Pipeline Aborted."
     exit 1 
 }
 
-# Retrieve the Run ID of the successful job
+# Retrieve Run ID
 $JobName = az ml job list --resource-group $ResourceGroup --workspace-name $Workspace --query "[0].name" --output tsv
 Write-Host ">>> Training Complete. Run ID: $JobName" -ForegroundColor Green
 
@@ -60,17 +55,19 @@ Write-Host ">>> [2/4] Registering Model Artifact..." -ForegroundColor Yellow
 $ModelName = "bgl-anomaly-rf"
 $ModelPath = "azureml://jobs/$JobName/outputs/artifacts/paths/model"
 
-az ml model create --name $ModelName --path $ModelPath --type mlflow_model --resource-group $ResourceGroup --workspace-name $Workspace --force
+# FIX: Removed '--force'. Azure will auto-increment version (e.g. 1 -> 2)
+az ml model create --name $ModelName --path $ModelPath --type mlflow_model --resource-group $ResourceGroup --workspace-name $Workspace
+
+if ($LASTEXITCODE -ne 0) { 
+    Write-Error "Model Registration Failed. Aborting before cluster destruction."
+    exit 1 
+}
 
 # -----------------------------------------------------------------
-# STEP 3: DESTROY CLUSTER TO RELEASE QUOTA
+# STEP 3: DESTROY CLUSTER (Split Lifecycle)
 # -----------------------------------------------------------------
 Write-Host ">>> [3/4] RELEASING QUOTA: Destroying Training Cluster..." -ForegroundColor Red
-
-# We MUST delete the 4-core cluster to allow the 2-core AZURE Endpoint to spin up.
-# Without this, there will be insufficient memory/quota to deploy the inference VM.
 az ml compute delete --name $Cluster --resource-group $ResourceGroup --workspace-name $Workspace --yes
-
 Write-Host ">>> Quota Released." -ForegroundColor Green
 
 # -----------------------------------------------------------------
@@ -78,14 +75,25 @@ Write-Host ">>> Quota Released." -ForegroundColor Green
 # -----------------------------------------------------------------
 Write-Host ">>> [4/4] Provisioning Managed Online Endpoint..." -ForegroundColor Yellow
 
-# Create Endpoint (The "Shell" - Costs nothing until deployment added)
-# We check if it exists first to avoid errors
-$EndpointExists = az ml online-endpoint show --name $EndpointName --resource-group $ResourceGroup --workspace-name $Workspace 2>$null
+# FIX: Safely check for endpoint existence without crashing on warnings
+$OldEAP = $ErrorActionPreference
+$ErrorActionPreference = "Continue" # Temporarily allow warnings
+$EndpointExists = $false
+
+# Try to show the endpoint. If it works (Exit Code 0), it exists.
+az ml online-endpoint show --name $EndpointName --resource-group $ResourceGroup --workspace-name $Workspace > $null 2>&1
+if ($LASTEXITCODE -eq 0) { $EndpointExists = $true }
+
+$ErrorActionPreference = $OldEAP # Reset error handling
+
 if (-not $EndpointExists) {
+    Write-Host ">>> Creating new Endpoint: $EndpointName"
     az ml online-endpoint create --name $EndpointName --auth-mode key --resource-group $ResourceGroup --workspace-name $Workspace
+} else {
+    Write-Host ">>> Endpoint exists. Skipping creation."
 }
 
-# Deploy the Model (This provisions the VM and eats the quota)
+# Deploy
 Write-Host ">>> Deploying Model to Inference VM ($InferenceVM)..."
 
 $DeployConfig = @"
@@ -98,10 +106,7 @@ instance_count: 1
 "@
 
 Set-Content -Path "deploy_config.yaml" -Value $DeployConfig -Encoding UTF8
-
-# This step takes 6-10 minutes
 az ml online-deployment create --file "deploy_config.yaml" --all-traffic --resource-group $ResourceGroup --workspace-name $Workspace
-
 Remove-Item "deploy_config.yaml"
 
 Write-Host ">>> SUCCESS: Pipeline Finished. REST API is Live." -ForegroundColor Cyan
