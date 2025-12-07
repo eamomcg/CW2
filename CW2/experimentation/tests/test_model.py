@@ -2,7 +2,7 @@ import pytest
 import pandas as pd
 import numpy as np
 
-# A simple mock test to satisfy Lab 6 Task 3 requirements
+
 def test_data_shape_logic():
     # Simulate a dummy dataframe similar to BGL
     data = {

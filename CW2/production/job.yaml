@@ -1,19 +1,19 @@
 $schema: https://azuremlschemas.azureedge.net/latest/commandJob.schema.json
 
-display_name: train-bgl-debug
-experiment_name: bgl-anomaly-detection
-description: Train Random Forest on BGL dataset with debug logging
+display_name: train-bgl-10forest
+experiment_name: bgl-pipeline-v1
+description: Train Random Forest (10 trees) on BGL parquet with F1 quality gate
 
 code: .
 
 command: >-
-  python -u model.py 
-  --data ${{inputs.training_data}} 
+  python -u model.py
+  --data ${{inputs.training_data}}
   --n_estimators 10
 
 inputs:
-  training_data: 
-    type: uri_file 
+  training_data:
+    type: uri_file
     path: azureml:bgl-data:1
 
 environment: azureml:AzureML-sklearn-1.0-ubuntu20.04-py38-cpu@latest
